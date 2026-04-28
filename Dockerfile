@@ -19,8 +19,17 @@ RUN wget https://github.com/projectdiscovery/httpx/releases/download/v1.6.0/http
     mv httpx /usr/local/bin/ && \
     rm httpx_1.6.0_linux_amd64.zip
 
+# Install Nuclei (NEW)
+RUN wget https://github.com/projectdiscovery/nuclei/releases/download/v3.3.0/nuclei_3.3.0_linux_amd64.zip && \
+    unzip nuclei_3.3.0_linux_amd64.zip && \
+    mv nuclei /usr/local/bin/ && \
+    rm nuclei_3.3.0_linux_amd64.zip
+
 # Set working directory
 WORKDIR /app
+
+# Download Nuclei Templates so they are baked into the image (NEW)
+RUN nuclei -update-templates
 
 # Install Python requests for webhooks
 RUN pip install --no-cache-dir requests
