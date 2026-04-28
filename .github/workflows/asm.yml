@@ -2,9 +2,8 @@ name: Continuous ASM Pipeline
 
 on:
   schedule:
-    # Runs at 00:00 UTC every day
-    - cron: '0 0 * * *'
-  workflow_dispatch: # Allows you to run it manually from the GitHub UI
+    - cron: '0 0 * * *' # Runs at 00:00 UTC every day
+  workflow_dispatch:
 
 jobs:
   run-recon:
@@ -14,19 +13,30 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v3
 
+      # This restores our SQLite database from previous runs!
+      - name: Cache Database
+        uses: actions/cache@v3
+        with:
+          path: data/asm_state.db
+          key: asm-db-${{ github.run_id }}
+          restore-keys: |
+            asm-db-
+
       - name: Build Docker Image
         run: docker build -t asm-pipeline .
 
+      - name: Create Data Directory
+        run: mkdir -p data
+
       - name: Run Pipeline
         env:
-          TARGET_DOMAIN: "example.com" # Change to your target
-          WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK }} # Store this in GitHub Secrets
+          TARGET_DOMAIN: "example.com" 
+          WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK }} 
         run: |
-          # We mount a volume so the SQLite database persists between Docker runs during the action
-          # Note: For true persistence across GitHub Action runs, you should upload the DB as an artifact 
-          # or use a remote PostgreSQL database.
+          # Map the local 'data' dir to '/app/data' inside the container
           docker run --rm \
             -e TARGET_DOMAIN=$TARGET_DOMAIN \
             -e WEBHOOK_URL=$WEBHOOK_URL \
-            -v ${{ github.workspace }}:/app/data \
+            -e DB_PATH=/app/data/asm_state.db \
+            -v ${{ github.workspace }}/data:/app/data \
             asm-pipeline
