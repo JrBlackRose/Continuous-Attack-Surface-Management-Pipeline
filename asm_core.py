@@ -2,18 +2,17 @@ import subprocess
 import sqlite3
 import requests
 import os
+import json
 from datetime import datetime
 
 # --- CONFIGURATION ---
 TARGET_DOMAIN = os.getenv("TARGET_DOMAIN", "example.com")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
-# Crucial: Allow overriding the DB path via env var so Docker can map it to our persistent folder
 DB_PATH = os.getenv("DB_PATH", "/app/data/asm_state.db") 
 SUBS_FILE = "/app/data/subs.txt"
+NEW_SUBS_FILE = "/app/data/new_subs.txt"
 
 def init_db():
-    """Initializes the SQLite database to store our state."""
-    # Ensure the directory exists
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -23,7 +22,6 @@ def init_db():
     return conn
 
 def run_tool(command):
-    """Runs a shell command and returns the output as a list of lines."""
     try:
         result = subprocess.run(command, shell=True, capture_output=True, text=True, check=True)
         return [line.strip() for line in result.stdout.split('\n') if line.strip()]
@@ -31,16 +29,20 @@ def run_tool(command):
         print(f"[!] Error running command {command}: {e.stderr}")
         return []
 
-def send_alert(new_assets):
-    """Sends a notification to a webhook (Discord/Slack)."""
+def send_alert(new_assets, vulnerabilities=None):
     if not WEBHOOK_URL or not new_assets:
         return
     
     message = f"🚨 **New Assets Discovered for {TARGET_DOMAIN}** 🚨\n"
     for asset in new_assets:
         message += f"- `{asset}`\n"
+        
+    if vulnerabilities:
+        message += "\n🔥 **Nuclei Vulnerabilities Detected!** 🔥\n"
+        for vuln in vulnerabilities:
+            message += f"- {vuln}\n"
     
-    payload = {"content": message} # Discord format
+    payload = {"content": message}
     
     try:
         response = requests.post(WEBHOOK_URL, json=payload)
@@ -62,17 +64,15 @@ def main():
         print("[-] No subdomains found. Exiting.")
         return
 
-    # Write subdomains to a file in the data directory
     with open(SUBS_FILE, "w") as f:
         f.write("\n".join(subdomains))
 
-    # Step 2: Alive Checking (Probing)
+    # Step 2: Alive Checking
     print("[*] Running httpx...")
     alive_assets = run_tool(f"httpx -l {SUBS_FILE} -silent")
 
-    # Step 3: Diffing (The Magic)
+    # Step 3: Diffing
     new_findings = []
-    
     for asset in alive_assets:
         c.execute("SELECT * FROM assets WHERE subdomain=?", (asset,))
         if not c.fetchone():
@@ -81,10 +81,31 @@ def main():
             c.execute("INSERT INTO assets (subdomain, is_alive, first_seen) VALUES (?, ?, ?)", 
                       (asset, True, timestamp))
     
-    # Step 4: Alerting and Committing
+    # Step 4: Vulnerability Scanning & Alerting
     if new_findings:
         print(f"[+] Found {len(new_findings)} new live assets!")
-        send_alert(new_findings)
+        
+        # Save new findings to a file for Nuclei to consume
+        with open(NEW_SUBS_FILE, "w") as f:
+            f.write("\n".join(new_findings))
+            
+        print("[*] Running Nuclei on newly discovered assets...")
+        # Run Nuclei looking for exposures, cves, and misconfigs. Output as JSON lines.
+        nuclei_cmd = f"nuclei -l {NEW_SUBS_FILE} -t http/cves,http/exposures,http/vulnerabilities -severity high,critical -jsonl -silent"
+        nuclei_output = run_tool(nuclei_cmd)
+        
+        vulns = []
+        for line in nuclei_output:
+            try:
+                data = json.loads(line)
+                severity = data.get('info', {}).get('severity', 'UNKNOWN').upper()
+                name = data.get('info', {}).get('name', 'Unknown')
+                matched_at = data.get('matched-at', 'Unknown')
+                vulns.append(f"**[{severity}]** {name} found at `{matched_at}`")
+            except json.JSONDecodeError:
+                continue
+
+        send_alert(new_findings, vulns)
         conn.commit()
     else:
         print("[-] No new assets discovered this run.")
